@@ -262,3 +262,43 @@ func (im *ImageManager) GetImage(name, tag string) *Image {
 	}
 	return nil
 }
+
+// TagImage creates a new tag for an existing image
+func (im *ImageManager) TagImage(sourceName, sourceTag, targetName, targetTag string) bool {
+	im.mu.Lock()
+
+	// Find the source image
+	var sourceImage *Image
+	for _, img := range im.images {
+		if img.Name == sourceName && img.Tag == sourceTag {
+			sourceImage = img
+			break
+		}
+	}
+
+	if sourceImage == nil {
+		im.mu.Unlock()
+		return false
+	}
+
+	// Create new image with the target name/tag but same ID
+	newImage := &Image{
+		ID:   sourceImage.ID, // Use same ID as source image
+		Name: targetName,
+		Tag:  targetTag,
+	}
+
+	// Add to images map
+	im.images[newImage.ID] = newImage
+
+	// Release lock before saving
+	im.mu.Unlock()
+
+	// Save after releasing the lock
+	if err := im.Save(); err != nil {
+		fmt.Printf("Warning: Failed to save image data: %v\n", err)
+		return false
+	}
+
+	return true
+}
