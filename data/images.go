@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -90,6 +91,7 @@ func (im *ImageManager) Save() error {
 
 	// Get the file path
 	filePath := GetImagesFilePath()
+	log.Println(filePath)
 
 	// Ensure the directory exists
 	dir := filepath.Dir(filePath)
@@ -109,11 +111,11 @@ func (im *ImageManager) Save() error {
 // PullImage simulates pulling an image
 func (im *ImageManager) PullImage(name, tag string) *Image {
 	im.mu.Lock()
-	defer im.mu.Unlock()
 
 	// Check if image already exists
 	for _, img := range im.images {
 		if img.Name == name && img.Tag == tag {
+			im.mu.Unlock() // Release lock before returning
 			fmt.Printf("Image %s:%s already exists\n", name, tag)
 			return img
 		}
@@ -123,7 +125,7 @@ func (im *ImageManager) PullImage(name, tag string) *Image {
 	fmt.Printf("Pulling image %s:%s\n", name, tag)
 	for i := 0; i <= 100; i += 10 {
 		fmt.Printf("Download progress: %d%%\n", i)
-		time.Sleep(100 * time.Millisecond) // Simulate download time
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	id := fmt.Sprintf("i%03d", im.counter)
@@ -135,6 +137,10 @@ func (im *ImageManager) PullImage(name, tag string) *Image {
 	}
 	im.images[id] = image
 
+	// Release lock before saving
+	im.mu.Unlock()
+
+	// Save after releasing the lock
 	if err := im.Save(); err != nil {
 		fmt.Printf("Warning: Failed to save image data: %v\n", err)
 	}
@@ -171,14 +177,88 @@ func (im *ImageManager) ListImages() []*Image {
 // RemoveImage removes an image
 func (im *ImageManager) RemoveImage(identifier string) bool {
 	im.mu.Lock()
-	defer im.mu.Unlock()
 
+	var found bool
 	for id, img := range im.images {
 		if img.ID == identifier || img.Name == identifier {
 			delete(im.images, id)
-			im.Save()
+			found = true
+			break
+		}
+	}
+
+	im.mu.Unlock()
+
+	if found {
+		im.Save()
+		return true
+	}
+	return false
+}
+
+// BuildImage creates a new image from a build context
+func (im *ImageManager) BuildImage(name, tag string) *Image {
+	im.mu.Lock()
+
+	// Check if image already exists
+	for _, img := range im.images {
+		if img.Name == name && img.Tag == tag {
+			im.mu.Unlock()
+			fmt.Printf("Image %s:%s already exists\n", name, tag)
+			return img
+		}
+	}
+
+	// Simulate build process
+	fmt.Printf("Building image %s:%s\n", name, tag)
+
+	// Generate new image ID
+	id := fmt.Sprintf("i%03d", im.counter)
+	im.counter++
+
+	// Create new image
+	image := &Image{
+		ID:   id,
+		Name: name,
+		Tag:  tag,
+	}
+	im.images[id] = image
+
+	// Release lock before saving
+	im.mu.Unlock()
+
+	// Save after releasing the lock
+	if err := im.Save(); err != nil {
+		fmt.Printf("Warning: Failed to save image data: %v\n", err)
+		return nil
+	}
+
+	fmt.Printf("Successfully built %s:%s with ID %s\n", name, tag, id)
+	return image
+}
+
+// Optional: Add a method to check if a base image exists
+func (im *ImageManager) HasImage(name, tag string) bool {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	for _, img := range im.images {
+		if img.Name == name && (img.Tag == tag || tag == "latest") {
 			return true
 		}
 	}
 	return false
+}
+
+// Optional: Add a method to get image by name and tag
+func (im *ImageManager) GetImage(name, tag string) *Image {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	for _, img := range im.images {
+		if img.Name == name && (img.Tag == tag || tag == "latest") {
+			return img
+		}
+	}
+	return nil
 }
