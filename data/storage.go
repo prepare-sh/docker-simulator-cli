@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	StorageDir     = "./mock-docker"
+	StorageDir     = "/tmp"
 	ContainersFile = "containers.json"
 	ImagesFile     = "images.json"
 )
