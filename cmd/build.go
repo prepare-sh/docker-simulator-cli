@@ -19,6 +19,7 @@ var (
 	buildNoCache     bool
 	buildPull        bool
 	buildContextPath string
+	buildRepoName    string // New flag to specify repository name
 )
 
 var buildCmd = &cobra.Command{
@@ -72,9 +73,7 @@ var buildCmd = &cobra.Command{
 		}
 		defer os.RemoveAll(tempDir)
 
-		// Copy build context to temp directory
 		fmt.Println("Preparing build context...")
-		copyDir(buildContextPath, tempDir)
 
 		// Check if GitHub CLI is installed
 		_, err = exec.LookPath("gh")
@@ -91,10 +90,6 @@ var buildCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Create GitHub repository
-		fmt.Println("Creating GitHub repository...")
-		repoName := fmt.Sprintf("docker-build-%s-%d", strings.ReplaceAll(name, "/", "-"), time.Now().Unix())
-
 		// Get current user's username (in lowercase)
 		userCmd := exec.Command("gh", "api", "user", "--jq", ".login")
 		userOutput, err := userCmd.Output()
@@ -105,20 +100,76 @@ var buildCmd = &cobra.Command{
 		username := strings.TrimSpace(string(userOutput))
 		username = strings.ToLower(username) // Ensure username is lowercase
 
-		// Create the repository
-		createCmd := exec.Command("gh", "repo", "create", repoName, "--public", "--description", "Automated Docker build repository")
-		createOutput, err := createCmd.CombinedOutput()
-		if err != nil {
-			fmt.Printf("Error creating GitHub repository: %v\n%s\n", err, string(createOutput))
-			os.Exit(1)
-		}
+		// Generate a unique branch name for this build
+		branchName := fmt.Sprintf("build-%s-%d", strings.ReplaceAll(name, "/", "-"), time.Now().Unix())
 
-		// Construct repository details manually
+		// Use the specified repo or the default one
+		repoName := buildRepoName
+		if repoName == "" {
+			repoName = "docker-builds" // Default repository name
+		}
 		fullRepoName := fmt.Sprintf("%s/%s", username, repoName)
 		cloneURL := fmt.Sprintf("https://github.com/%s.git", fullRepoName)
 		htmlURL := fmt.Sprintf("https://github.com/%s", fullRepoName)
 
-		fmt.Printf("Repository created: %s\n", htmlURL)
+		// Check if the repository exists, if not create it
+		repoCheckCmd := exec.Command("gh", "repo", "view", fullRepoName, "--json", "name")
+		if err := repoCheckCmd.Run(); err != nil {
+			fmt.Printf("Repository %s does not exist. Creating it...\n", fullRepoName)
+			createCmd := exec.Command("gh", "repo", "create", repoName, "--public", "--description", "Docker build repository")
+			createOutput, err := createCmd.CombinedOutput()
+			if err != nil {
+				fmt.Printf("Error creating GitHub repository: %v\n%s\n", err, string(createOutput))
+				os.Exit(1)
+			}
+			fmt.Printf("Repository created: %s\n", htmlURL)
+		} else {
+			fmt.Printf("Using existing repository: %s\n", htmlURL)
+		}
+
+		// Save the Dockerfile and any other necessary files to a temporary location
+		buildContextTempDir, err := ioutil.TempDir("", "build-context-")
+		if err != nil {
+			fmt.Printf("Error creating temp directory for build context: %v\n", err)
+			os.Exit(1)
+		}
+		defer os.RemoveAll(buildContextTempDir)
+
+		// Copy build context to the temporary storage
+		copyDir(buildContextPath, buildContextTempDir)
+
+		// Clean the temporary directory to ensure it's empty before cloning
+		os.RemoveAll(tempDir)
+		os.MkdirAll(tempDir, 0755)
+
+		// Clone the repository
+		fmt.Println("Cloning repository...")
+		cloneCmd := exec.Command("git", "clone", cloneURL, tempDir)
+		cloneOutput, err := cloneCmd.CombinedOutput()
+		if err != nil {
+			fmt.Printf("Error cloning repository: %v\n%s\n", err, string(cloneOutput))
+			os.Exit(1)
+		}
+
+		// Create a new branch
+		fmt.Printf("Creating new branch: %s\n", branchName)
+		runCommand(tempDir, "git", "checkout", "-b", branchName)
+
+		// Remove all files except .git directory
+		files, err := ioutil.ReadDir(tempDir)
+		if err != nil {
+			fmt.Printf("Error reading temp directory: %v\n", err)
+			os.Exit(1)
+		}
+		for _, f := range files {
+			if f.Name() != ".git" {
+				os.RemoveAll(filepath.Join(tempDir, f.Name()))
+			}
+		}
+
+		// Copy build context from temporary storage to the repo directory
+		fmt.Println("Copying build context to repository...")
+		copyDir(buildContextTempDir, tempDir)
 
 		// Add GitHub Actions workflow file
 		workflowsDir := filepath.Join(tempDir, ".github", "workflows")
@@ -127,7 +178,7 @@ var buildCmd = &cobra.Command{
 
 on:
   push:
-    branches: [ main ]
+    branches: [ %s ]
 
 jobs:
   build:
@@ -162,7 +213,13 @@ jobs:
         tags: |
           ghcr.io/%s/%s:%s
           ghcr.io/%s/%s:${{ steps.vars.outputs.sha }}
-`, username, name, tag, username, name)
+          
+    - name: Delete branch
+      uses: dawidd6/action-delete-branch@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branches: %s
+`, branchName, username, name, tag, username, name, branchName)
 
 		err = ioutil.WriteFile(filepath.Join(workflowsDir, "docker-build.yml"), []byte(workflowContent), 0644)
 		if err != nil {
@@ -170,32 +227,25 @@ jobs:
 			os.Exit(1)
 		}
 
-		// Initialize git repo and push to GitHub
-		fmt.Println("Initializing Git repository...")
-		runCommand(tempDir, "git", "init")
+		// Commit changes
+		fmt.Println("Committing changes...")
 		runCommand(tempDir, "git", "add", ".")
 		runCommand(tempDir, "git", "config", "user.email", "dockercli@example.com")
 		runCommand(tempDir, "git", "config", "user.name", "Docker CLI")
-		runCommand(tempDir, "git", "commit", "-m", "Initial commit for Docker build")
-		runCommand(tempDir, "git", "branch", "-M", "main")
-		runCommand(tempDir, "git", "remote", "add", "origin", cloneURL)
+		runCommand(tempDir, "git", "commit", "-m", "Docker build for "+name+":"+tag)
 
-		// Push using gh cli to handle auth
-		fmt.Println("Pushing to GitHub repository...")
-		pushCmd := exec.Command("gh", "repo", "sync")
+		// Push the branch
+		fmt.Printf("Pushing branch %s to GitHub...\n", branchName)
+		pushCmd := exec.Command("git", "push", "-u", "origin", branchName)
 		pushCmd.Dir = tempDir
 		pushOutput, err := pushCmd.CombinedOutput()
 		if err != nil {
-			// Try regular git push as fallback
-			fmt.Println("Using fallback push method...")
-			pushErr := runCommand(tempDir, "git", "push", "-u", "origin", "main")
-			if pushErr != nil {
-				fmt.Printf("Error pushing to GitHub: %v\n%s\n", err, string(pushOutput))
-				os.Exit(1)
-			}
+			fmt.Printf("Error pushing to GitHub: %v\n%s\n", err, string(pushOutput))
+			os.Exit(1)
 		}
 
 		fmt.Printf("Build started. Your image is being built in GitHub Actions at: %s/actions\n", htmlURL)
+		fmt.Printf("Branch: %s\n", branchName)
 		fmt.Println("Waiting for build to complete...")
 
 		// Define the full image name for GHCR
@@ -218,6 +268,7 @@ jobs:
 		}
 
 		fmt.Println("\nBuild completed successfully!")
+		fmt.Println("The build branch will be automatically deleted by the workflow")
 
 		// Add image to local registry
 		img := ImageMgr.BuildImage(imageFullName, tag)
@@ -229,7 +280,7 @@ jobs:
 
 // Copy directory recursively
 func copyDir(src, dst string) error {
-	// Create destination directory
+	// Create destination directory if it doesn't exist
 	if err := os.MkdirAll(dst, 0755); err != nil {
 		return err
 	}
@@ -287,4 +338,5 @@ func init() {
 	buildCmd.Flags().StringVarP(&buildTag, "tag", "t", "", "Name and optionally a tag in the format 'name:tag'")
 	buildCmd.Flags().BoolVar(&buildNoCache, "no-cache", false, "Do not use cache when building the image")
 	buildCmd.Flags().BoolVar(&buildPull, "pull", false, "Always attempt to pull a newer version of the image")
+	buildCmd.Flags().StringVar(&buildRepoName, "repo", "", "Name of the GitHub repository to use for builds")
 }

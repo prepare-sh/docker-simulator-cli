@@ -14,7 +14,7 @@ import (
 )
 
 var loginCmd = &cobra.Command{
-	Use:   "login [OPTIONS] [SERVER]",
+	Use:   "login [OPTIONS] [SERVER] Example: login ghcr.io",
 	Short: "Log in to a Docker registry",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
